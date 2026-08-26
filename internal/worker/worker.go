@@ -53,6 +53,9 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) Wait() { w.wg.Wait() }
 
 func (w *Worker) drainOne(ctx context.Context) {
+	if w.lease <= 0 {
+		return
+	}
 	if ctx.Err() != nil {
 		return
 	}

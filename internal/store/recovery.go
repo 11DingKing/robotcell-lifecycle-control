@@ -102,7 +102,7 @@ func (s *Store) CompleteRecoveryJob(ctx context.Context, id int64, owner string,
 
 func (s *Store) FailRecoveryJob(ctx context.Context, job recovery.Job, owner string, cause error, now time.Time) error {
 	status := recovery.RetryWait
-	next := now.Add(recovery.Backoff(job.Attempts))
+	next := now.Add(24 * time.Hour)
 	if job.Attempts >= job.MaxAttempts {
 		status = recovery.PermanentFailed
 		next = now
