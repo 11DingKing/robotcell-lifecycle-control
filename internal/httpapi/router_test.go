@@ -171,6 +171,13 @@ func TestRoleAuthorizationReturnsStableForbiddenError(t *testing.T) {
 	if !strings.Contains(string(data), `"code":"FORBIDDEN"`) || !strings.Contains(string(data), `"message":"you cannot perform this action"`) {
 		t.Fatalf("unexpected forbidden response: %s", data)
 	}
+	events, err := fx.database.ListAudit(context.Background(), "robot_cell", "0", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "cell.create" || events[0].Result != "rejected" || events[0].ActorRole != string(identity.RoleOperator) {
+		t.Fatalf("authorization rejection audit missing: %#v", events)
+	}
 }
 
 func TestRequestIDIsAcceptedWhenValidAndReplacedWhenOversized(t *testing.T) {

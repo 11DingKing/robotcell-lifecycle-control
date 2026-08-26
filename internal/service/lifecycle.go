@@ -21,27 +21,31 @@ type Lifecycle struct {
 
 func NewLifecycle(s *store.Store, c clock.Clock) *Lifecycle { return &Lifecycle{store: s, clock: c} }
 
-func (s *Lifecycle) CreateCell(ctx context.Context, cell lifecycle.RobotCell) (lifecycle.RobotCell, error) {
-	principal, err := RequireRole(ctx, identity.RoleLineManager, identity.RoleIntegrator)
+func (s *Lifecycle) CreateCell(ctx context.Context, cell lifecycle.RobotCell, requestID string) (lifecycle.RobotCell, error) {
+	principal, err := requireRoleWithAudit(ctx, s.store, s.clock, "cell.create", "robot_cell", 0, requestID, identity.RoleLineManager, identity.RoleIntegrator)
 	if err != nil {
 		return lifecycle.RobotCell{}, err
 	}
 	if principal.Role == identity.RoleIntegrator && cell.IntegratorID != principal.UserID {
-		return lifecycle.RobotCell{}, apperr.New(apperr.ErrForbidden, "service.create_cell", "integrator can only register its own cell")
+		err = rejectWithAudit(ctx, s.store, s.clock, principal, "cell.create", "robot_cell", 0, requestID, map[string]any{"requested_integrator_id": cell.IntegratorID})
+		return lifecycle.RobotCell{}, err
 	}
 	cell.Status = lifecycle.CellSurveyed
 	return s.store.CreateCell(ctx, cell)
 }
 
 func (s *Lifecycle) Transition(ctx context.Context, id, expected int64, next lifecycle.CellStatus, reason, requestID string) (lifecycle.RobotCell, error) {
-	principal, err := PrincipalFromContext(ctx)
-	if err != nil {
-		return lifecycle.RobotCell{}, err
+	if next == lifecycle.CellRetired {
+		return s.Retire(ctx, id, expected, requestID)
 	}
 	allowed := map[lifecycle.CellStatus][]identity.Role{lifecycle.CellProposed: {identity.RoleIntegrator}, lifecycle.CellApproved: {identity.RoleLineManager}, lifecycle.CellScheduled: {identity.RoleLineManager}, lifecycle.CellInstalling: {identity.RoleIntegrator, identity.RoleOperator}, lifecycle.CellCalibrating: {identity.RoleIntegrator}, lifecycle.CellSafetyReview: {identity.RoleIntegrator}, lifecycle.CellProduction: {identity.RoleLineManager}, lifecycle.CellMaintenance: {identity.RoleMaintenance}, lifecycle.CellRetired: {identity.RoleLineManager}}
 	roles, ok := allowed[next]
-	if !ok || !principal.HasAny(roles...) {
-		return lifecycle.RobotCell{}, apperr.New(apperr.ErrForbidden, "service.transition_cell", "role cannot perform requested transition")
+	if !ok {
+		return lifecycle.RobotCell{}, apperr.New(apperr.ErrInvalid, "service.transition_cell", "requested transition target is unknown")
+	}
+	principal, err := requireRoleWithAudit(ctx, s.store, s.clock, "cell.transition", "robot_cell", id, requestID, roles...)
+	if err != nil {
+		return lifecycle.RobotCell{}, err
 	}
 	return s.store.TransitionCell(ctx, principal, id, expected, next, reason, requestID, s.clock.Now())
 }
@@ -51,7 +55,7 @@ func (s *Lifecycle) RecordInspection(ctx context.Context, item lifecycle.Inspect
 	if item.Kind == lifecycle.InspectionQuality {
 		required = identity.RoleQualityEngineer
 	}
-	principal, err := RequireRole(ctx, required)
+	principal, err := requireRoleWithAudit(ctx, s.store, s.clock, "inspection.record", "robot_cell", item.CellID, requestID, required)
 	if err != nil {
 		return lifecycle.RobotCell{}, err
 	}
@@ -60,8 +64,8 @@ func (s *Lifecycle) RecordInspection(ctx context.Context, item lifecycle.Inspect
 	return s.store.RecordInspection(ctx, principal, item, requestID)
 }
 
-func (s *Lifecycle) ReportCalibrationFailure(ctx context.Context, cellID int64, idempotencyKey, reason string) (recovery.Job, error) {
-	principal, err := RequireRole(ctx, identity.RoleIntegrator, identity.RoleOperator)
+func (s *Lifecycle) ReportCalibrationFailure(ctx context.Context, cellID int64, idempotencyKey, reason, requestID string) (recovery.Job, error) {
+	principal, err := requireRoleWithAudit(ctx, s.store, s.clock, "calibration.failure_report", "robot_cell", cellID, requestID, identity.RoleIntegrator, identity.RoleOperator)
 	if err != nil {
 		return recovery.Job{}, err
 	}
@@ -91,5 +95,9 @@ func (s *Lifecycle) List(ctx context.Context, status lifecycle.CellStatus, page,
 func (s *Lifecycle) Retire(ctx context.Context, id, expected int64, requestID string) (lifecycle.RobotCell, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return s.Transition(ctx, id, expected, lifecycle.CellRetired, "lifecycle completed", requestID)
+	principal, err := requireRoleWithAudit(ctx, s.store, s.clock, "cell.retire", "robot_cell", id, requestID, identity.RoleLineManager)
+	if err != nil {
+		return lifecycle.RobotCell{}, err
+	}
+	return s.store.RetireCell(ctx, principal, id, expected, "lifecycle completed", requestID, s.clock.Now())
 }

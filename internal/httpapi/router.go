@@ -107,7 +107,7 @@ func (a *API) createCell(w http.ResponseWriter, r *http.Request) {
 		writeError(a.logger, w, r, err)
 		return
 	}
-	result, err := a.lifecycle.CreateCell(r.Context(), input)
+	result, err := a.lifecycle.CreateCell(r.Context(), input, RequestID(r.Context()))
 	if err != nil {
 		writeError(a.logger, w, r, err)
 		return
@@ -167,7 +167,7 @@ func (a *API) calibrationFailure(w http.ResponseWriter, r *http.Request) {
 	}
 	if err = decodeJSON(w, r, &input); err == nil {
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-		job, jobErr := a.lifecycle.ReportCalibrationFailure(r.Context(), id, key, input.Reason)
+		job, jobErr := a.lifecycle.ReportCalibrationFailure(r.Context(), id, key, input.Reason, RequestID(r.Context()))
 		err = jobErr
 		if err == nil {
 			writeJSON(w, 202, job)
@@ -183,7 +183,7 @@ func (a *API) createWindow(w http.ResponseWriter, r *http.Request) {
 		writeError(a.logger, w, r, err)
 		return
 	}
-	result, err := a.scheduling.Request(r.Context(), input)
+	result, err := a.scheduling.Request(r.Context(), input, RequestID(r.Context()))
 	if err != nil {
 		writeError(a.logger, w, r, err)
 		return
@@ -239,7 +239,7 @@ func (a *API) createMaintenance(w http.ResponseWriter, r *http.Request) {
 		writeError(a.logger, w, r, err)
 		return
 	}
-	result, err := a.maintenance.Open(r.Context(), input)
+	result, err := a.maintenance.Open(r.Context(), input, RequestID(r.Context()))
 	if err != nil {
 		writeError(a.logger, w, r, err)
 		return

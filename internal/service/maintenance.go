@@ -18,8 +18,8 @@ func NewMaintenance(s *store.Store, c clock.Clock) *Maintenance {
 	return &Maintenance{store: s, clock: c}
 }
 
-func (s *Maintenance) Open(ctx context.Context, order maintenance.Order) (maintenance.Order, error) {
-	if _, err := RequireRole(ctx, identity.RoleOperator, identity.RoleMaintenance, identity.RoleLineManager); err != nil {
+func (s *Maintenance) Open(ctx context.Context, order maintenance.Order, requestID string) (maintenance.Order, error) {
+	if _, err := requireRoleWithAudit(ctx, s.store, s.clock, "maintenance.open", "maintenance_order", 0, requestID, identity.RoleOperator, identity.RoleMaintenance, identity.RoleLineManager); err != nil {
 		return maintenance.Order{}, err
 	}
 	order.Status = maintenance.Opened
@@ -27,7 +27,7 @@ func (s *Maintenance) Open(ctx context.Context, order maintenance.Order) (mainte
 }
 
 func (s *Maintenance) Advance(ctx context.Context, id, expected int64, next maintenance.Status, requestID string) (maintenance.Order, error) {
-	principal, err := RequireRole(ctx, identity.RoleMaintenance, identity.RoleLineManager, identity.RoleQualityEngineer)
+	principal, err := requireRoleWithAudit(ctx, s.store, s.clock, "maintenance.transition", "maintenance_order", id, requestID, identity.RoleMaintenance, identity.RoleLineManager, identity.RoleQualityEngineer)
 	if err != nil {
 		return maintenance.Order{}, err
 	}

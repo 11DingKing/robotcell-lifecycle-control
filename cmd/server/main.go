@@ -55,12 +55,7 @@ func main() {
 	maintenanceService := service.NewMaintenance(database, appClock)
 	recoveryWorker := worker.New(database, appClock, logger, "server-worker", cfg.WorkerInterval, cfg.WorkerLease)
 	recoveryWorker.Register("calibration_compensation", func(ctx context.Context, job recovery.Job) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			return nil
-		}
+		return database.CompensateCalibration(ctx, job, appClock.Now())
 	})
 	go recoveryWorker.Run(rootCtx)
 	handler := httpapi.New(database, authService, lifecycleService, schedulingService, maintenanceService, logger)

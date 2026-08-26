@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -621,5 +622,109 @@ func TestAuditHashChainLinksEvents(t *testing.T) {
 	}
 	if second.PreviousHash != first.EventHash {
 		t.Fatalf("audit chain previous=%s want=%s", second.PreviousHash, first.EventHash)
+	}
+}
+
+func TestCalibrationCompensationRestoresInstallStateOnce(t *testing.T) {
+	fx := newFixture(t)
+	ctx := context.Background()
+	if _, err := fx.store.db.ExecContext(ctx, `UPDATE robot_cells SET status=?,calibration_ref='FAILED-CAL',version=7 WHERE id=?`, lifecycle.CellCalibrating, fx.cell.ID); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"cell_id": fx.cell.ID, "reason": "laser target lost", "actor_id": fx.integrator.ID, "version": 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := fx.store.CreateRecoveryJob(ctx, recovery.Job{Kind: "calibration_compensation", ObjectType: "robot_cell", ObjectID: fx.cell.ID, IdempotencyKey: "compensate-once", Payload: payload, MaxAttempts: 3, NextAttemptAt: fx.now, CreatedAt: fx.now, UpdatedAt: fx.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fx.store.CompensateCalibration(ctx, job, fx.now); err != nil {
+		t.Fatalf("compensate calibration: %v", err)
+	}
+	cell, err := fx.store.GetCell(ctx, fx.cell.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cell.Status != lifecycle.CellInstalling || cell.CalibrationRef != "" || cell.Version != 8 {
+		t.Fatalf("unexpected compensated cell: %#v", cell)
+	}
+	events, err := fx.store.ListAudit(ctx, "robot_cell", fmt.Sprint(fx.cell.ID), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "recovery.calibration_compensate" {
+		t.Fatalf("unexpected recovery audit: %#v", events)
+	}
+	if err = fx.store.CompensateCalibration(ctx, job, fx.now.Add(time.Minute)); err != nil {
+		t.Fatalf("repeat compensation must be idempotent: %v", err)
+	}
+	events, err = fx.store.ListAudit(ctx, "robot_cell", fmt.Sprint(fx.cell.ID), 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("repeat compensation duplicated audit: count=%d error=%v", len(events), err)
+	}
+}
+
+func TestRetirementRejectsActiveMaintenanceAndPreservesCell(t *testing.T) {
+	fx := newFixture(t)
+	ctx := context.Background()
+	if _, err := fx.store.db.ExecContext(ctx, `UPDATE robot_cells SET status=?,version=4 WHERE id=?`, lifecycle.CellProduction, fx.cell.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.store.CreateMaintenanceOrder(ctx, maintenance.Order{Code: "MO-RETIRE", CellID: fx.cell.ID, AssigneeID: fx.maintainer.ID, Priority: 2, Summary: "待处理保养", Status: maintenance.Opened, DueAt: fx.now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fx.store.RetireCell(ctx, principal(fx.manager), fx.cell.ID, 4, "退役", "req-retire-blocked", fx.now)
+	if !errors.Is(err, apperr.ErrConflict) {
+		t.Fatalf("active maintenance retirement error = %v", err)
+	}
+	cell, err := fx.store.GetCell(ctx, fx.cell.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cell.Status != lifecycle.CellProduction || cell.Version != 4 {
+		t.Fatalf("blocked retirement mutated cell: %#v", cell)
+	}
+}
+
+func TestRetirementRejectsActiveResourceReservation(t *testing.T) {
+	fx := newFixture(t)
+	ctx := context.Background()
+	start := fx.now.Add(24 * time.Hour)
+	window, err := fx.store.CreateWindow(ctx, schedule.WorkWindow{CellID: fx.cell.ID, WorkstationID: fx.station.ID, ToolID: fx.tool.ID, QualifiedUserID: fx.operator.ID, StartsAt: start, EndsAt: start.Add(time.Hour), Status: schedule.WindowRequested, Purpose: "退役前安装冲突"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fx.store.ApproveAndReserveWindow(ctx, principal(fx.manager), window.ID, window.Version, "robot_installation", "req-reserve-retire", fx.now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fx.store.db.ExecContext(ctx, `UPDATE robot_cells SET status=?,version=5 WHERE id=?`, lifecycle.CellProduction, fx.cell.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = fx.store.RetireCell(ctx, principal(fx.manager), fx.cell.ID, 5, "退役", "req-retire-reservation", fx.now)
+	if !errors.Is(err, apperr.ErrConflict) {
+		t.Fatalf("active reservation retirement error = %v", err)
+	}
+}
+
+func TestRetirementSucceedsAfterCrossObjectClosure(t *testing.T) {
+	fx := newFixture(t)
+	ctx := context.Background()
+	if _, err := fx.store.db.ExecContext(ctx, `UPDATE robot_cells SET status=?,version=6 WHERE id=?`, lifecycle.CellProduction, fx.cell.ID); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := fx.store.RetireCell(ctx, principal(fx.manager), fx.cell.ID, 6, "生命周期结束", "req-retire", fx.now)
+	if err != nil {
+		t.Fatalf("retire closed cell: %v", err)
+	}
+	if retired.Status != lifecycle.CellRetired || retired.Version != 7 {
+		t.Fatalf("unexpected retired cell: %#v", retired)
+	}
+	events, err := fx.store.ListAudit(ctx, "robot_cell", fmt.Sprint(fx.cell.ID), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "cell.retire" {
+		t.Fatalf("retirement audit missing: %#v", events)
 	}
 }

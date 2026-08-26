@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/11DingKing/robotcell-lifecycle-control/internal/audit"
 	"github.com/11DingKing/robotcell-lifecycle-control/internal/identity"
 	"github.com/11DingKing/robotcell-lifecycle-control/internal/lifecycle"
+	"github.com/11DingKing/robotcell-lifecycle-control/internal/maintenance"
+	"github.com/11DingKing/robotcell-lifecycle-control/internal/recovery"
 )
 
 func (s *Store) CreateBatch(ctx context.Context, batch lifecycle.ProductionBatch) (lifecycle.ProductionBatch, error) {
@@ -180,4 +183,113 @@ func (s *Store) RecordInspection(ctx context.Context, principal identity.Princip
 		return err
 	})
 	return updated, err
+}
+
+func (s *Store) RetireCell(ctx context.Context, principal identity.Principal, id, expected int64, reason, requestID string, now time.Time) (lifecycle.RobotCell, error) {
+	var updated lifecycle.RobotCell
+	err := s.WithTx(ctx, func(tx *sql.Tx) error {
+		cell, err := getCell(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if cell.Version != expected {
+			return apperr.New(apperr.ErrVersion, "store.retire_cell", "robot cell changed concurrently")
+		}
+		if !cell.CanTransition(lifecycle.CellRetired) {
+			return apperr.New(apperr.ErrInvalid, "store.retire_cell", "robot cell is not eligible for retirement")
+		}
+		var activeMaintenance int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM maintenance_orders WHERE cell_id=? AND status NOT IN (?,?)`, id, maintenance.Closed, maintenance.Cancelled).Scan(&activeMaintenance); err != nil {
+			return fmt.Errorf("check active maintenance: %w", err)
+		}
+		if activeMaintenance > 0 {
+			return apperr.New(apperr.ErrConflict, "store.retire_cell", "active maintenance orders must be closed or cancelled")
+		}
+		var activeReservations int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM resource_reservations r JOIN work_windows w ON w.id=r.window_id WHERE w.cell_id=? AND r.released_at IS NULL`, id).Scan(&activeReservations); err != nil {
+			return fmt.Errorf("check active reservations: %w", err)
+		}
+		if activeReservations > 0 {
+			return apperr.New(apperr.ErrConflict, "store.retire_cell", "active resource reservations must be released")
+		}
+		if cell.BatchID != nil {
+			var batchStatus lifecycle.BatchStatus
+			if err = tx.QueryRowContext(ctx, `SELECT status FROM production_batches WHERE id=?`, *cell.BatchID).Scan(&batchStatus); err != nil {
+				return fmt.Errorf("read production batch: %w", err)
+			}
+			if batchStatus == lifecycle.BatchActive {
+				return apperr.New(apperr.ErrConflict, "store.retire_cell", "active production batch still references robot cell")
+			}
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE robot_cells SET status=?,version=version+1,updated_at=? WHERE id=? AND version=?`, lifecycle.CellRetired, encodeTime(now), id, expected)
+		if err != nil {
+			return fmt.Errorf("retire robot cell: %w", err)
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return apperr.New(apperr.ErrVersion, "store.retire_cell", "robot cell changed concurrently")
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO cell_transitions(cell_id,from_status,to_status,actor_id,reason,request_id,occurred_at) VALUES(?,?,?,?,?,?,?)`, id, cell.Status, lifecycle.CellRetired, principal.UserID, reason, requestID, encodeTime(now)); err != nil {
+			return fmt.Errorf("record retirement transition: %w", err)
+		}
+		event, err := audit.New(principal.UserID, string(principal.Role), "cell.retire", "robot_cell", strconv.FormatInt(id, 10), requestID, audit.ResultSucceeded, map[string]any{"from": cell.Status, "to": lifecycle.CellRetired}, now)
+		if err != nil {
+			return err
+		}
+		if _, err = appendAudit(ctx, tx, event); err != nil {
+			return err
+		}
+		updated, err = getCell(ctx, tx, id)
+		return err
+	})
+	return updated, err
+}
+
+func (s *Store) CompensateCalibration(ctx context.Context, job recovery.Job, now time.Time) error {
+	var payload struct {
+		CellID  int64  `json:"cell_id"`
+		Reason  string `json:"reason"`
+		ActorID int64  `json:"actor_id"`
+		Version int64  `json:"version"`
+	}
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		return apperr.Wrap(apperr.ErrInvalid, "store.compensate_calibration", "invalid recovery payload", err)
+	}
+	if payload.CellID != job.ObjectID || payload.ActorID <= 0 || payload.Reason == "" {
+		return apperr.New(apperr.ErrInvalid, "store.compensate_calibration", "recovery payload does not identify the failed calibration")
+	}
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		cell, err := getCell(ctx, tx, payload.CellID)
+		if err != nil {
+			return err
+		}
+		if cell.Status == lifecycle.CellInstalling {
+			return nil
+		}
+		if cell.Status != lifecycle.CellCalibrating {
+			return apperr.New(apperr.ErrConflict, "store.compensate_calibration", "robot cell moved beyond the recoverable calibration state")
+		}
+		var actorRole identity.Role
+		if err = tx.QueryRowContext(ctx, `SELECT role FROM users WHERE id=? AND active=1`, payload.ActorID).Scan(&actorRole); err != nil {
+			return fmt.Errorf("read recovery actor: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE robot_cells SET status=?,calibration_ref='',version=version+1,updated_at=? WHERE id=? AND status=? AND version=?`, lifecycle.CellInstalling, encodeTime(now), cell.ID, lifecycle.CellCalibrating, cell.Version)
+		if err != nil {
+			return fmt.Errorf("apply calibration compensation: %w", err)
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return apperr.New(apperr.ErrVersion, "store.compensate_calibration", "robot cell changed during compensation")
+		}
+		requestID := fmt.Sprintf("recovery-job-%d", job.ID)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO cell_transitions(cell_id,from_status,to_status,actor_id,reason,request_id,occurred_at) VALUES(?,?,?,?,?,?,?)`, cell.ID, cell.Status, lifecycle.CellInstalling, payload.ActorID, "calibration compensation: "+payload.Reason, requestID, encodeTime(now)); err != nil {
+			return fmt.Errorf("record compensation transition: %w", err)
+		}
+		event, err := audit.New(payload.ActorID, string(actorRole), "recovery.calibration_compensate", "robot_cell", strconv.FormatInt(cell.ID, 10), requestID, audit.ResultSucceeded, map[string]any{"job_id": job.ID, "reason": payload.Reason}, now)
+		if err != nil {
+			return err
+		}
+		_, err = appendAudit(ctx, tx, event)
+		return err
+	})
 }
