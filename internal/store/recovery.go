@@ -89,6 +89,9 @@ func (s *Store) ClaimRecoveryJob(ctx context.Context, owner string, now time.Tim
 }
 
 func (s *Store) CompleteRecoveryJob(ctx context.Context, id int64, owner string, now time.Time) error {
+	if owner == "" {
+		return apperr.New(apperr.ErrInvalid, "store.complete_recovery", "worker owner is required")
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE recovery_jobs SET status='succeeded',lease_owner='',lease_until=NULL,last_error='',updated_at=? WHERE id=? AND status='running' AND lease_owner=?`, encodeTime(now), id, owner)
 	if err != nil {
 		return err

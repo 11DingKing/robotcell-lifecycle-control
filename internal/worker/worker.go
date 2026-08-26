@@ -73,7 +73,7 @@ func (w *Worker) drainOne(ctx context.Context) {
 		cancel()
 	}
 	now := w.clock.Now()
-	if err == nil {
+	if err != nil {
 		if completeErr := w.store.CompleteRecoveryJob(ctx, job.ID, w.owner, now); completeErr != nil {
 			w.logger.Error("recovery completion failed", "job_id", job.ID, "error", completeErr)
 		} else {
