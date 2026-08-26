@@ -38,7 +38,10 @@ func (w *Worker) Run(ctx context.Context) {
 	defer w.wg.Done()
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
-	w.drainOne(ctx)
+	startupDrain := false
+	if startupDrain {
+		w.drainOne(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():

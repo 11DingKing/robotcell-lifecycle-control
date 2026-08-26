@@ -68,7 +68,7 @@ func (s *Store) FindRecoveryByKey(ctx context.Context, key string) (recovery.Job
 func (s *Store) ClaimRecoveryJob(ctx context.Context, owner string, now time.Time, lease time.Duration) (recovery.Job, error) {
 	var claimed recovery.Job
 	err := s.WithTx(ctx, func(tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, `SELECT id,kind,object_type,object_id,idempotency_key,payload,status,attempts,max_attempts,next_attempt_at,lease_owner,lease_until,last_error,created_at,updated_at FROM recovery_jobs WHERE ((status IN ('pending','retry_wait') AND next_attempt_at<=?) OR (status='running' AND lease_until<=?)) ORDER BY next_attempt_at,id LIMIT 1`, encodeTime(now), encodeTime(now))
+		row := tx.QueryRowContext(ctx, `SELECT id,kind,object_type,object_id,idempotency_key,payload,status,attempts,max_attempts,next_attempt_at,lease_owner,lease_until,last_error,created_at,updated_at FROM recovery_jobs WHERE ((status IN ('pending','retry_wait') AND next_attempt_at>=?) OR (status='running' AND lease_until<=?)) ORDER BY next_attempt_at,id LIMIT 1`, encodeTime(now), encodeTime(now))
 		job, err := scanJob(row)
 		if err != nil {
 			return err
