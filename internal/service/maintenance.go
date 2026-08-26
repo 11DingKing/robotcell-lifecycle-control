@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/11DingKing/robotcell-lifecycle-control/internal/clock"
 	"github.com/11DingKing/robotcell-lifecycle-control/internal/identity"
@@ -30,6 +31,9 @@ func (s *Maintenance) Advance(ctx context.Context, id, expected int64, next main
 	principal, err := requireRoleWithAudit(ctx, s.store, s.clock, "maintenance.transition", "maintenance_order", id, requestID, identity.RoleMaintenance, identity.RoleLineManager, identity.RoleQualityEngineer)
 	if err != nil {
 		return maintenance.Order{}, err
+	}
+	if requestID == "" {
+		return maintenance.Order{}, fmt.Errorf("request id is required")
 	}
 	return s.store.AdvanceMaintenance(ctx, principal, id, expected, next, requestID, s.clock.Now())
 }

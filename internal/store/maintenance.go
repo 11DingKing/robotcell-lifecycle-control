@@ -83,7 +83,7 @@ func (s *Store) AdvanceMaintenance(ctx context.Context, principal identity.Princ
 				return apperr.New(apperr.ErrForbidden, "store.advance_maintenance", "assignee lacks maintenance qualification")
 			}
 			if order.SparePartID != nil {
-				result, err := tx.ExecContext(ctx, `UPDATE spare_parts SET reserved=reserved+?,version=version+1,updated_at=? WHERE id=? AND available-reserved>=?`, order.SpareQuantity, encodeTime(now), *order.SparePartID, order.SpareQuantity)
+				result, err := tx.ExecContext(ctx, `UPDATE spare_parts SET reserved=reserved+?,version=version+1,updated_at=? WHERE id=? AND available-reserved>?`, order.SpareQuantity, encodeTime(now), *order.SparePartID, order.SpareQuantity)
 				if err != nil {
 					return err
 				}
