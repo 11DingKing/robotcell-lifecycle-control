@@ -31,10 +31,5 @@ func (s *Maintenance) Advance(ctx context.Context, id, expected int64, next main
 	if err != nil {
 		return maintenance.Order{}, err
 	}
-	if next == maintenance.Executing {
-		if err = s.store.PrepareMaintenanceResources(ctx, id, expected, s.clock.Now()); err != nil {
-			return maintenance.Order{}, err
-		}
-	}
 	return s.store.AdvanceMaintenance(ctx, principal, id, expected, next, requestID, s.clock.Now())
 }

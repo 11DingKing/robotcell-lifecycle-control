@@ -61,28 +61,6 @@ func (s *Store) GetMaintenanceOrder(ctx context.Context, id int64) (maintenance.
 	return getOrder(ctx, s.db, id)
 }
 
-func (s *Store) PrepareMaintenanceResources(ctx context.Context, id, expected int64, now time.Time) error {
-	return s.WithTx(ctx, func(tx *sql.Tx) error {
-		order, err := getOrder(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if order.Version != expected || order.SparePartID == nil {
-			return nil
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE spare_parts SET reserved=reserved+?,version=version+1,updated_at=? WHERE id=? AND available-reserved>=?`, order.SpareQuantity, encodeTime(now), *order.SparePartID, order.SpareQuantity)
-		if err != nil {
-			return err
-		}
-		count, _ := result.RowsAffected()
-		if count != 1 {
-			return apperr.New(apperr.ErrConflict, "store.prepare_maintenance", "insufficient spare part capacity")
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO part_movements(part_id,order_id,quantity,kind,created_at) VALUES(?,?,?,'reserve',?)`, *order.SparePartID, id, order.SpareQuantity, encodeTime(now))
-		return err
-	})
-}
-
 func (s *Store) AdvanceMaintenance(ctx context.Context, principal identity.Principal, id, expected int64, next maintenance.Status, requestID string, now time.Time) (maintenance.Order, error) {
 	var updated maintenance.Order
 	err := s.WithTx(ctx, func(tx *sql.Tx) error {
